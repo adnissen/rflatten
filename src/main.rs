@@ -20,11 +20,11 @@ struct Cli {
     #[arg(short = 'y', long = "yes")]
     skip_confirmation: bool,
 
-    /// Include only directories that fuzzy-match these patterns (comma-separated)
+    /// Include only directories that start with these patterns (comma-separated)
     #[arg(short = 'i', long = "include", value_delimiter = ',')]
     include: Option<Vec<String>>,
 
-    /// Exclude directories that fuzzy-match these patterns (comma-separated)
+    /// Exclude directories that start with these patterns (comma-separated)
     #[arg(short = 'e', long = "exclude", value_delimiter = ',')]
     exclude: Option<Vec<String>>,
 }
@@ -35,9 +35,9 @@ struct FileSummary {
     top_level_dirs: std::collections::HashSet<String>,
 }
 
-/// Fuzzy match: checks if the pattern is a case-insensitive substring of the target
-fn fuzzy_match(target: &str, pattern: &str) -> bool {
-    target.to_lowercase().contains(&pattern.to_lowercase())
+/// Prefix match: checks if the target starts with the pattern (case-insensitive)
+fn starts_with_pattern(target: &str, pattern: &str) -> bool {
+    target.to_lowercase().starts_with(&pattern.to_lowercase())
 }
 
 /// Check if a top-level directory should be included based on include/exclude patterns
@@ -48,12 +48,12 @@ fn should_include_top_level_dir(
 ) -> bool {
     // Check include patterns
     if let Some(include_patterns) = include {
-        return include_patterns.iter().any(|p| fuzzy_match(dir_name, p));
+        return include_patterns.iter().any(|p| starts_with_pattern(dir_name, p));
     }
 
     // Check exclude patterns
     if let Some(exclude_patterns) = exclude {
-        return !exclude_patterns.iter().any(|p| fuzzy_match(dir_name, p));
+        return !exclude_patterns.iter().any(|p| starts_with_pattern(dir_name, p));
     }
 
     // No filters, include everything
@@ -439,16 +439,19 @@ mod tests {
         Ok(())
     }
 
-    // Tests for fuzzy_match
+    // Tests for starts_with_pattern
     #[test]
-    fn test_fuzzy_match() {
-        assert!(fuzzy_match("docs", "doc"));
-        assert!(fuzzy_match("documentation", "doc"));
-        assert!(fuzzy_match("DOCS", "doc"));
-        assert!(fuzzy_match("docs", "DOC"));
-        assert!(!fuzzy_match("src", "doc"));
-        assert!(fuzzy_match("src", "src"));
-        assert!(fuzzy_match("tests", "test"));
+    fn test_starts_with_pattern() {
+        assert!(starts_with_pattern("docs", "doc"));
+        assert!(starts_with_pattern("documentation", "doc"));
+        assert!(starts_with_pattern("DOCS", "doc"));
+        assert!(starts_with_pattern("docs", "DOC"));
+        assert!(!starts_with_pattern("src", "doc"));
+        assert!(starts_with_pattern("src", "src"));
+        assert!(starts_with_pattern("tests", "test"));
+        // Test that it's prefix matching, not substring matching
+        assert!(!starts_with_pattern("mydocs", "doc"));
+        assert!(!starts_with_pattern("src", "rc"));
     }
 
     // Tests for should_include_top_level_dir
@@ -484,11 +487,13 @@ mod tests {
     }
 
     #[test]
-    fn test_should_include_with_fuzzy_matching() {
+    fn test_should_include_with_prefix_matching() {
         let include = Some(vec!["doc".to_string()]);
         assert!(should_include_top_level_dir("docs", &include, &None));
         assert!(should_include_top_level_dir("documentation", &include, &None));
         assert!(!should_include_top_level_dir("src", &include, &None));
+        // Test that it's prefix matching, not substring matching
+        assert!(!should_include_top_level_dir("mydocs", &include, &None));
     }
 
     // Tests for collect_file_summary
@@ -557,12 +562,12 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_summary_with_fuzzy_include() {
+    fn test_collect_summary_with_prefix_include() {
         let temp_dir = TempDir::new().unwrap();
         let root = temp_dir.path();
         create_multi_dir_structure(root).unwrap();
 
-        // "doc" should match both "docs" and "documentation"
+        // "doc" should match both "docs" and "documentation" (prefix match)
         let include = Some(vec!["doc".to_string()]);
         let summary = collect_file_summary(root, None, &include, &None).unwrap();
 
