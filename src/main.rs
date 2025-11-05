@@ -29,54 +29,72 @@ struct Cli {
     exclude: Option<Vec<String>>,
 }
 
+/// Summary of files to be flattened
+struct FileSummary {
+    file_count: usize,
+    top_level_dirs: std::collections::HashSet<String>,
+}
+
 /// Fuzzy match: checks if the pattern is a case-insensitive substring of the target
 fn fuzzy_match(target: &str, pattern: &str) -> bool {
     target.to_lowercase().contains(&pattern.to_lowercase())
 }
 
-/// Filter files based on include/exclude patterns for top-level directories
-fn filter_files_by_patterns(
-    root: &Path,
-    files: Vec<PathBuf>,
+/// Check if a top-level directory should be included based on include/exclude patterns
+fn should_include_top_level_dir(
+    dir_name: &str,
     include: &Option<Vec<String>>,
     exclude: &Option<Vec<String>>,
-) -> Vec<PathBuf> {
-    files
-        .into_iter()
-        .filter(|file| {
-            // Get the top-level directory name
-            if let Ok(relative_path) = file.strip_prefix(root) {
-                if let Some(first_component) = relative_path.components().next() {
-                    if let Some(dir_name) = first_component.as_os_str().to_str() {
-                        // Check include patterns
-                        if let Some(include_patterns) = include {
-                            return include_patterns.iter().any(|p| fuzzy_match(dir_name, p));
-                        }
+) -> bool {
+    // Check include patterns
+    if let Some(include_patterns) = include {
+        return include_patterns.iter().any(|p| fuzzy_match(dir_name, p));
+    }
 
-                        // Check exclude patterns
-                        if let Some(exclude_patterns) = exclude {
-                            return !exclude_patterns.iter().any(|p| fuzzy_match(dir_name, p));
-                        }
-                    }
-                }
-            }
-            true
-        })
-        .collect()
+    // Check exclude patterns
+    if let Some(exclude_patterns) = exclude {
+        return !exclude_patterns.iter().any(|p| fuzzy_match(dir_name, p));
+    }
+
+    // No filters, include everything
+    true
 }
 
-fn collect_files(dir: &Path, max_depth: Option<usize>) -> io::Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    collect_files_recursive(dir, dir, max_depth, 0, &mut files)?;
-    Ok(files)
+/// Collect summary of files
+fn collect_file_summary(
+    dir: &Path,
+    max_depth: Option<usize>,
+    include: &Option<Vec<String>>,
+    exclude: &Option<Vec<String>>,
+) -> io::Result<FileSummary> {
+    let mut summary = FileSummary {
+        file_count: 0,
+        top_level_dirs: std::collections::HashSet::new(),
+    };
+
+    collect_file_summary_recursive(
+        dir,
+        dir,
+        max_depth,
+        0,
+        include,
+        exclude,
+        &mut summary,
+        None,
+    )?;
+
+    Ok(summary)
 }
 
-fn collect_files_recursive(
+fn collect_file_summary_recursive(
     root: &Path,
     current: &Path,
     max_depth: Option<usize>,
     current_depth: usize,
-    files: &mut Vec<PathBuf>,
+    include: &Option<Vec<String>>,
+    exclude: &Option<Vec<String>>,
+    summary: &mut FileSummary,
+    top_level_dir: Option<String>,
 ) -> io::Result<()> {
     if let Some(max) = max_depth {
         if current_depth > max {
@@ -90,12 +108,43 @@ fn collect_files_recursive(
         let file_type = entry.file_type()?;
 
         if file_type.is_dir() {
+            // Determine the top-level directory name
+            let new_top_level_dir = if current == root {
+                // We're at the root, so this subdirectory is a top-level directory
+                if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
+                    // Check if we should include this top-level directory
+                    if !should_include_top_level_dir(dir_name, include, exclude) {
+                        continue; // Skip this entire subtree
+                    }
+                    Some(dir_name.to_string())
+                } else {
+                    continue;
+                }
+            } else {
+                // We're in a subdirectory, inherit the top-level directory
+                top_level_dir.clone()
+            };
+
             // Recursively traverse subdirectories
-            collect_files_recursive(root, &path, max_depth, current_depth + 1, files)?;
+            collect_file_summary_recursive(
+                root,
+                &path,
+                max_depth,
+                current_depth + 1,
+                include,
+                exclude,
+                summary,
+                new_top_level_dir,
+            )?;
         } else if file_type.is_file() {
-            // Only collect files that are in subdirectories (not in root)
+            // Only count files that are in subdirectories (not in root)
             if path.parent() != Some(root) {
-                files.push(path);
+                summary.file_count += 1;
+
+                // Track the top-level directory
+                if let Some(ref dir) = top_level_dir {
+                    summary.top_level_dirs.insert(dir.clone());
+                }
             }
         }
     }
@@ -104,7 +153,7 @@ fn collect_files_recursive(
 }
 
 fn get_confirmation() -> io::Result<bool> {
-    print!("Proceed with flatten? (Y/n): ");
+    print!("Proceed? (Y/n): ");
     io::stdout().flush()?;
 
     let mut input = String::new();
@@ -114,51 +163,125 @@ fn get_confirmation() -> io::Result<bool> {
     Ok(input == "Y" || input == "YES")
 }
 
-fn flatten_directory(root: &Path, files: Vec<PathBuf>) -> io::Result<()> {
+/// Flatten directory
+fn flatten_directory_by_traversal(
+    root: &Path,
+    max_depth: Option<usize>,
+    include: &Option<Vec<String>>,
+    exclude: &Option<Vec<String>>,
+) -> io::Result<usize> {
     let mut moved_count = 0;
 
-    for file_path in files {
-        let file_name = match file_path.file_name() {
-            Some(name) => name,
-            None => continue,
-        };
+    flatten_directory_by_traversal_recursive(
+        root,
+        root,
+        max_depth,
+        0,
+        include,
+        exclude,
+        &mut moved_count,
+        None,
+    )?;
 
-        let mut dest = root.join(file_name);
+    Ok(moved_count)
+}
 
-        // Handle filename conflicts by appending a number
-        let mut counter = 1;
-        while dest.exists() {
-            let stem = Path::new(file_name)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("file");
-            let extension = Path::new(file_name)
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
+fn flatten_directory_by_traversal_recursive(
+    root: &Path,
+    current: &Path,
+    max_depth: Option<usize>,
+    current_depth: usize,
+    include: &Option<Vec<String>>,
+    exclude: &Option<Vec<String>>,
+    moved_count: &mut usize,
+    top_level_dir: Option<String>,
+) -> io::Result<()> {
+    if let Some(max) = max_depth {
+        if current_depth > max {
+            return Ok(());
+        }
+    }
 
-            let new_name = if extension.is_empty() {
-                format!("{}_{}", stem, counter)
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+
+        if file_type.is_dir() {
+            // Determine the top-level directory name
+            let new_top_level_dir = if current == root {
+                // We're at the root, so this subdirectory is a top-level directory
+                if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
+                    // Check if we should include this top-level directory
+                    if !should_include_top_level_dir(dir_name, include, exclude) {
+                        continue; // Skip this entire subtree
+                    }
+                    Some(dir_name.to_string())
+                } else {
+                    continue;
+                }
             } else {
-                format!("{}_{}.{}", stem, counter, extension)
+                // We're in a subdirectory, inherit the top-level directory
+                top_level_dir.clone()
             };
 
-            dest = root.join(new_name);
-            counter += 1;
-        }
+            // Recursively traverse subdirectories
+            flatten_directory_by_traversal_recursive(
+                root,
+                &path,
+                max_depth,
+                current_depth + 1,
+                include,
+                exclude,
+                moved_count,
+                new_top_level_dir,
+            )?;
+        } else if file_type.is_file() {
+            // Only move files that are in subdirectories (not in root)
+            if path.parent() != Some(root) {
+                // Move the file to root
+                let file_name = match path.file_name() {
+                    Some(name) => name,
+                    None => continue,
+                };
 
-        match fs::rename(&file_path, &dest) {
-            Ok(_) => {
-                moved_count += 1;
-                println!("Moved: {} -> {}", file_path.display(), dest.display());
-            }
-            Err(e) => {
-                eprintln!("Error moving {}: {}", file_path.display(), e);
+                let mut dest = root.join(file_name);
+
+                // Handle filename conflicts by appending a number
+                let mut counter = 1;
+                while dest.exists() {
+                    let stem = Path::new(file_name)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("file");
+                    let extension = Path::new(file_name)
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+
+                    let new_name = if extension.is_empty() {
+                        format!("{}_{}", stem, counter)
+                    } else {
+                        format!("{}_{}.{}", stem, counter, extension)
+                    };
+
+                    dest = root.join(new_name);
+                    counter += 1;
+                }
+
+                match fs::rename(&path, &dest) {
+                    Ok(_) => {
+                        *moved_count += 1;
+                        println!("Moved: {} -> {}", path.display(), dest.display());
+                    }
+                    Err(e) => {
+                        eprintln!("Error moving {}: {}", path.display(), e);
+                    }
+                }
             }
         }
     }
 
-    println!("\nSuccessfully moved {} file(s)", moved_count);
     Ok(())
 }
 
@@ -185,35 +308,29 @@ fn main() -> io::Result<()> {
     // Canonicalize the path to get the full absolute path
     let canonical_directory = cli.directory.canonicalize()?;
 
-    // Collect files to be moved
-    let mut files = collect_files(&canonical_directory, cli.max_depth)?;
+    // Collect summary of files to be moved (memory efficient - doesn't store all paths)
+    let summary = collect_file_summary(
+        &canonical_directory,
+        cli.max_depth,
+        &cli.include,
+        &cli.exclude,
+    )?;
 
-    // Filter files based on include/exclude patterns
-    files = filter_files_by_patterns(&canonical_directory, files, &cli.include, &cli.exclude);
-
-    if files.is_empty() {
+    if summary.file_count == 0 {
         println!("No files found in subdirectories to flatten.");
         return Ok(());
     }
 
-    // Collect unique top-level directories that will be flattened
-    let mut top_level_dirs = std::collections::HashSet::new();
-    for file in &files {
-        if let Ok(relative_path) = file.strip_prefix(&canonical_directory) {
-            if let Some(first_component) = relative_path.components().next() {
-                if let Some(dir_name) = first_component.as_os_str().to_str() {
-                    top_level_dirs.insert(dir_name.to_string());
-                }
-            }
-        }
-    }
-
     // Show summary and get confirmation
-    println!("Found {} file(s) to move to '{}'", files.len(), canonical_directory.display());
+    println!(
+        "Found {} file(s) to move to '{}'",
+        summary.file_count,
+        canonical_directory.display()
+    );
 
-    if !top_level_dirs.is_empty() {
+    if !summary.top_level_dirs.is_empty() {
         println!("Top-level directories to be flattened:");
-        let mut dirs: Vec<_> = top_level_dirs.clone().into_iter().collect();
+        let mut dirs: Vec<_> = summary.top_level_dirs.iter().cloned().collect();
         dirs.sort();
         for dir in dirs {
             println!("  - {}", dir);
@@ -227,15 +344,22 @@ fn main() -> io::Result<()> {
         }
     }
 
-    // Perform the flattening
-    flatten_directory(&canonical_directory, files)?;
+    // Perform the flattening (re-traverses the filesystem)
+    let moved_count = flatten_directory_by_traversal(
+        &canonical_directory,
+        cli.max_depth,
+        &cli.include,
+        &cli.exclude,
+    )?;
+
+    println!("\nSuccessfully moved {} file(s)", moved_count);
 
     // Delete the now-empty top-level directories
-    for dir in top_level_dirs {
-        let dir_path = canonical_directory.join(&dir);
+    for dir in &summary.top_level_dirs {
+        let dir_path = canonical_directory.join(dir);
         if dir_path.exists() && dir_path.is_dir() {
             match fs::remove_dir_all(&dir_path) {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(e) => eprintln!("Error removing directory {}: {}", dir, e),
             }
         }
@@ -284,211 +408,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_collect_files_unlimited_depth() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path();
-        create_test_structure(root).unwrap();
-
-        let files = collect_files(root, None).unwrap();
-
-        // Should collect all files except file0.txt (which is in root)
-        assert_eq!(files.len(), 4);
-
-        let file_names: Vec<String> = files
-            .iter()
-            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
-            .collect();
-
-        assert!(file_names.contains(&"file1.txt".to_string()));
-        assert!(file_names.contains(&"file2.txt".to_string()));
-        assert!(file_names.contains(&"file3.txt".to_string()));
-        assert!(file_names.contains(&"file4.txt".to_string()));
-    }
-
-    #[test]
-    fn test_collect_files_max_depth_1() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path();
-        create_test_structure(root).unwrap();
-
-        let files = collect_files(root, Some(1)).unwrap();
-
-        // Should only collect file1.txt (at depth 1)
-        assert_eq!(files.len(), 1);
-        assert_eq!(
-            files[0].file_name().unwrap().to_str().unwrap(),
-            "file1.txt"
-        );
-    }
-
-    #[test]
-    fn test_collect_files_max_depth_2() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path();
-        create_test_structure(root).unwrap();
-
-        let files = collect_files(root, Some(2)).unwrap();
-
-        // Should collect file1.txt and file2.txt (depths 1 and 2)
-        assert_eq!(files.len(), 2);
-
-        let file_names: Vec<String> = files
-            .iter()
-            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
-            .collect();
-
-        assert!(file_names.contains(&"file1.txt".to_string()));
-        assert!(file_names.contains(&"file2.txt".to_string()));
-        assert!(!file_names.contains(&"file3.txt".to_string()));
-        assert!(!file_names.contains(&"file4.txt".to_string()));
-    }
-
-    #[test]
-    fn test_collect_files_max_depth_3() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path();
-        create_test_structure(root).unwrap();
-
-        let files = collect_files(root, Some(3)).unwrap();
-
-        // Should collect files at depths 1, 2, and 3
-        assert_eq!(files.len(), 3);
-
-        let file_names: Vec<String> = files
-            .iter()
-            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
-            .collect();
-
-        assert!(file_names.contains(&"file1.txt".to_string()));
-        assert!(file_names.contains(&"file2.txt".to_string()));
-        assert!(file_names.contains(&"file3.txt".to_string()));
-        assert!(!file_names.contains(&"file4.txt".to_string()));
-    }
-
-    #[test]
-    fn test_collect_files_max_depth_0() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path();
-        create_test_structure(root).unwrap();
-
-        let files = collect_files(root, Some(0)).unwrap();
-
-        // Should collect no files (depth 0 means only look in root, but we don't collect root files)
-        assert_eq!(files.len(), 0);
-    }
-
-    #[test]
-    fn test_flatten_directory_no_conflicts() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path();
-
-        // Create subdirectory with files
-        let subdir = root.join("subdir");
-        fs::create_dir(&subdir).unwrap();
-        fs::write(subdir.join("test1.txt"), "content1").unwrap();
-        fs::write(subdir.join("test2.txt"), "content2").unwrap();
-
-        let files = collect_files(root, None).unwrap();
-        assert_eq!(files.len(), 2);
-
-        flatten_directory(root, files).unwrap();
-
-        // Check files were moved to root
-        assert!(root.join("test1.txt").exists());
-        assert!(root.join("test2.txt").exists());
-        assert_eq!(
-            fs::read_to_string(root.join("test1.txt")).unwrap(),
-            "content1"
-        );
-        assert_eq!(
-            fs::read_to_string(root.join("test2.txt")).unwrap(),
-            "content2"
-        );
-    }
-
-    #[test]
-    fn test_flatten_directory_with_conflicts() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path();
-
-        // Create a file in root
-        fs::write(root.join("test.txt"), "root content").unwrap();
-
-        // Create subdirectory with conflicting filename
-        let subdir = root.join("subdir");
-        fs::create_dir(&subdir).unwrap();
-        fs::write(subdir.join("test.txt"), "subdir content").unwrap();
-
-        let files = collect_files(root, None).unwrap();
-        assert_eq!(files.len(), 1);
-
-        flatten_directory(root, files).unwrap();
-
-        // Original file should remain unchanged
-        assert_eq!(
-            fs::read_to_string(root.join("test.txt")).unwrap(),
-            "root content"
-        );
-
-        // Conflicting file should be renamed
-        assert!(root.join("test_1.txt").exists());
-        assert_eq!(
-            fs::read_to_string(root.join("test_1.txt")).unwrap(),
-            "subdir content"
-        );
-    }
-
-    #[test]
-    fn test_flatten_directory_multiple_conflicts() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path();
-
-        // Create a file in root
-        fs::write(root.join("test.txt"), "root").unwrap();
-
-        // Create multiple subdirectories with the same filename
-        let subdir1 = root.join("subdir1");
-        fs::create_dir(&subdir1).unwrap();
-        fs::write(subdir1.join("test.txt"), "content1").unwrap();
-
-        let subdir2 = root.join("subdir2");
-        fs::create_dir(&subdir2).unwrap();
-        fs::write(subdir2.join("test.txt"), "content2").unwrap();
-
-        let files = collect_files(root, None).unwrap();
-        assert_eq!(files.len(), 2);
-
-        flatten_directory(root, files).unwrap();
-
-        // Should have test.txt, test_1.txt, and test_2.txt
-        assert!(root.join("test.txt").exists());
-        assert!(root.join("test_1.txt").exists());
-        assert!(root.join("test_2.txt").exists());
-    }
-
-    #[test]
-    fn test_empty_directory() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path();
-
-        let files = collect_files(root, None).unwrap();
-        assert_eq!(files.len(), 0);
-    }
-
-    #[test]
-    fn test_only_root_files() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path();
-
-        fs::write(root.join("file1.txt"), "content1").unwrap();
-        fs::write(root.join("file2.txt"), "content2").unwrap();
-
-        let files = collect_files(root, None).unwrap();
-        // Should not collect files that are already in root
-        assert_eq!(files.len(), 0);
-    }
-
     fn create_multi_dir_structure(root: &Path) -> io::Result<()> {
         // Create structure with multiple top-level directories:
         // root/
@@ -520,6 +439,7 @@ mod tests {
         Ok(())
     }
 
+    // Tests for fuzzy_match
     #[test]
     fn test_fuzzy_match() {
         assert!(fuzzy_match("docs", "doc"));
@@ -531,143 +451,288 @@ mod tests {
         assert!(fuzzy_match("tests", "test"));
     }
 
+    // Tests for should_include_top_level_dir
     #[test]
-    fn test_include_single_pattern() {
+    fn test_should_include_no_filters() {
+        assert!(should_include_top_level_dir("docs", &None, &None));
+        assert!(should_include_top_level_dir("src", &None, &None));
+        assert!(should_include_top_level_dir("tests", &None, &None));
+    }
+
+    #[test]
+    fn test_should_include_with_include_filter() {
+        let include = Some(vec!["src".to_string()]);
+        assert!(!should_include_top_level_dir("docs", &include, &None));
+        assert!(should_include_top_level_dir("src", &include, &None));
+        assert!(!should_include_top_level_dir("tests", &include, &None));
+    }
+
+    #[test]
+    fn test_should_include_with_multiple_include_filters() {
+        let include = Some(vec!["src".to_string(), "test".to_string()]);
+        assert!(!should_include_top_level_dir("docs", &include, &None));
+        assert!(should_include_top_level_dir("src", &include, &None));
+        assert!(should_include_top_level_dir("tests", &include, &None)); // matches "test"
+    }
+
+    #[test]
+    fn test_should_include_with_exclude_filter() {
+        let exclude = Some(vec!["src".to_string()]);
+        assert!(should_include_top_level_dir("docs", &None, &exclude));
+        assert!(!should_include_top_level_dir("src", &None, &exclude));
+        assert!(should_include_top_level_dir("tests", &None, &exclude));
+    }
+
+    #[test]
+    fn test_should_include_with_fuzzy_matching() {
+        let include = Some(vec!["doc".to_string()]);
+        assert!(should_include_top_level_dir("docs", &include, &None));
+        assert!(should_include_top_level_dir("documentation", &include, &None));
+        assert!(!should_include_top_level_dir("src", &include, &None));
+    }
+
+    // Tests for collect_file_summary
+    #[test]
+    fn test_collect_summary_unlimited_depth() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        create_test_structure(root).unwrap();
+
+        let summary = collect_file_summary(root, None, &None, &None).unwrap();
+
+        // Should count all files except file0.txt (which is in root)
+        assert_eq!(summary.file_count, 4);
+        assert_eq!(summary.top_level_dirs.len(), 1);
+        assert!(summary.top_level_dirs.contains("level1"));
+    }
+
+    #[test]
+    fn test_collect_summary_max_depth_1() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        create_test_structure(root).unwrap();
+
+        let summary = collect_file_summary(root, Some(1), &None, &None).unwrap();
+
+        // Should only count file1.txt (at depth 1)
+        assert_eq!(summary.file_count, 1);
+    }
+
+    #[test]
+    fn test_collect_summary_max_depth_2() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        create_test_structure(root).unwrap();
+
+        let summary = collect_file_summary(root, Some(2), &None, &None).unwrap();
+
+        // Should count file1.txt and file2.txt (depths 1 and 2)
+        assert_eq!(summary.file_count, 2);
+    }
+
+    #[test]
+    fn test_collect_summary_max_depth_0() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        create_test_structure(root).unwrap();
+
+        let summary = collect_file_summary(root, Some(0), &None, &None).unwrap();
+
+        // Should count no files (depth 0 means only look in root, but we don't count root files)
+        assert_eq!(summary.file_count, 0);
+    }
+
+    #[test]
+    fn test_collect_summary_with_include() {
         let temp_dir = TempDir::new().unwrap();
         let root = temp_dir.path();
         create_multi_dir_structure(root).unwrap();
-
-        let files = collect_files(root, None).unwrap();
-        assert_eq!(files.len(), 4);
 
         let include = Some(vec!["src".to_string()]);
-        let filtered = filter_files_by_patterns(root, files, &include, &None);
+        let summary = collect_file_summary(root, None, &include, &None).unwrap();
 
-        assert_eq!(filtered.len(), 1);
-        assert!(filtered[0].to_str().unwrap().contains("main.rs"));
+        assert_eq!(summary.file_count, 1);
+        assert!(summary.top_level_dirs.contains("src"));
+        assert!(!summary.top_level_dirs.contains("docs"));
     }
 
     #[test]
-    fn test_include_multiple_patterns() {
+    fn test_collect_summary_with_fuzzy_include() {
         let temp_dir = TempDir::new().unwrap();
         let root = temp_dir.path();
         create_multi_dir_structure(root).unwrap();
-
-        let files = collect_files(root, None).unwrap();
-        assert_eq!(files.len(), 4);
-
-        let include = Some(vec!["src".to_string(), "test".to_string()]);
-        let filtered = filter_files_by_patterns(root, files, &include, &None);
-
-        assert_eq!(filtered.len(), 2);
-        let file_names: Vec<String> = filtered
-            .iter()
-            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
-            .collect();
-        assert!(file_names.contains(&"main.rs".to_string()));
-        assert!(file_names.contains(&"test1.rs".to_string()));
-    }
-
-    #[test]
-    fn test_include_fuzzy_pattern() {
-        let temp_dir = TempDir::new().unwrap();
-        let root = temp_dir.path();
-        create_multi_dir_structure(root).unwrap();
-
-        let files = collect_files(root, None).unwrap();
-        assert_eq!(files.len(), 4);
 
         // "doc" should match both "docs" and "documentation"
         let include = Some(vec!["doc".to_string()]);
-        let filtered = filter_files_by_patterns(root, files, &include, &None);
+        let summary = collect_file_summary(root, None, &include, &None).unwrap();
 
-        assert_eq!(filtered.len(), 2);
-        let file_names: Vec<String> = filtered
-            .iter()
-            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
-            .collect();
-        assert!(file_names.contains(&"readme.txt".to_string()));
-        assert!(file_names.contains(&"guide.txt".to_string()));
+        assert_eq!(summary.file_count, 2);
+        assert!(summary.top_level_dirs.contains("docs"));
+        assert!(summary.top_level_dirs.contains("documentation"));
+        assert!(!summary.top_level_dirs.contains("src"));
     }
 
     #[test]
-    fn test_exclude_single_pattern() {
+    fn test_collect_summary_with_exclude() {
         let temp_dir = TempDir::new().unwrap();
         let root = temp_dir.path();
         create_multi_dir_structure(root).unwrap();
-
-        let files = collect_files(root, None).unwrap();
-        assert_eq!(files.len(), 4);
 
         let exclude = Some(vec!["src".to_string()]);
-        let filtered = filter_files_by_patterns(root, files, &None, &exclude);
+        let summary = collect_file_summary(root, None, &None, &exclude).unwrap();
 
-        assert_eq!(filtered.len(), 3);
-        let file_names: Vec<String> = filtered
-            .iter()
-            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
-            .collect();
-        assert!(file_names.contains(&"readme.txt".to_string()));
-        assert!(file_names.contains(&"test1.rs".to_string()));
-        assert!(file_names.contains(&"guide.txt".to_string()));
-        assert!(!file_names.contains(&"main.rs".to_string()));
+        assert_eq!(summary.file_count, 3);
+        assert!(!summary.top_level_dirs.contains("src"));
+        assert!(summary.top_level_dirs.contains("docs"));
     }
 
     #[test]
-    fn test_exclude_multiple_patterns() {
+    fn test_collect_summary_empty_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        let summary = collect_file_summary(root, None, &None, &None).unwrap();
+        assert_eq!(summary.file_count, 0);
+        assert_eq!(summary.top_level_dirs.len(), 0);
+    }
+
+    // Tests for flatten_directory_by_traversal
+    #[test]
+    fn test_flatten_no_conflicts() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        // Create subdirectory with files
+        let subdir = root.join("subdir");
+        fs::create_dir(&subdir).unwrap();
+        fs::write(subdir.join("test1.txt"), "content1").unwrap();
+        fs::write(subdir.join("test2.txt"), "content2").unwrap();
+
+        let moved_count = flatten_directory_by_traversal(root, None, &None, &None).unwrap();
+
+        assert_eq!(moved_count, 2);
+        assert!(root.join("test1.txt").exists());
+        assert!(root.join("test2.txt").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("test1.txt")).unwrap(),
+            "content1"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("test2.txt")).unwrap(),
+            "content2"
+        );
+    }
+
+    #[test]
+    fn test_flatten_with_conflicts() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        // Create a file in root
+        fs::write(root.join("test.txt"), "root content").unwrap();
+
+        // Create subdirectory with conflicting filename
+        let subdir = root.join("subdir");
+        fs::create_dir(&subdir).unwrap();
+        fs::write(subdir.join("test.txt"), "subdir content").unwrap();
+
+        let moved_count = flatten_directory_by_traversal(root, None, &None, &None).unwrap();
+
+        assert_eq!(moved_count, 1);
+        // Original file should remain unchanged
+        assert_eq!(
+            fs::read_to_string(root.join("test.txt")).unwrap(),
+            "root content"
+        );
+
+        // Conflicting file should be renamed
+        assert!(root.join("test_1.txt").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("test_1.txt")).unwrap(),
+            "subdir content"
+        );
+    }
+
+    #[test]
+    fn test_flatten_multiple_conflicts() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        // Create a file in root
+        fs::write(root.join("test.txt"), "root").unwrap();
+
+        // Create multiple subdirectories with the same filename
+        let subdir1 = root.join("subdir1");
+        fs::create_dir(&subdir1).unwrap();
+        fs::write(subdir1.join("test.txt"), "content1").unwrap();
+
+        let subdir2 = root.join("subdir2");
+        fs::create_dir(&subdir2).unwrap();
+        fs::write(subdir2.join("test.txt"), "content2").unwrap();
+
+        let moved_count = flatten_directory_by_traversal(root, None, &None, &None).unwrap();
+
+        assert_eq!(moved_count, 2);
+        assert!(root.join("test.txt").exists());
+        assert!(root.join("test_1.txt").exists());
+        assert!(root.join("test_2.txt").exists());
+    }
+
+    #[test]
+    fn test_flatten_with_max_depth() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        create_test_structure(root).unwrap();
+
+        let moved_count = flatten_directory_by_traversal(root, Some(2), &None, &None).unwrap();
+
+        // Should only move files at depths 1 and 2
+        assert_eq!(moved_count, 2);
+        assert!(root.join("file1.txt").exists());
+        assert!(root.join("file2.txt").exists());
+        assert!(!root.join("file3.txt").exists());
+        assert!(!root.join("file4.txt").exists());
+    }
+
+    #[test]
+    fn test_flatten_with_include_filter() {
         let temp_dir = TempDir::new().unwrap();
         let root = temp_dir.path();
         create_multi_dir_structure(root).unwrap();
 
-        let files = collect_files(root, None).unwrap();
-        assert_eq!(files.len(), 4);
+        let include = Some(vec!["src".to_string()]);
+        let moved_count = flatten_directory_by_traversal(root, None, &include, &None).unwrap();
 
-        let exclude = Some(vec!["src".to_string(), "test".to_string()]);
-        let filtered = filter_files_by_patterns(root, files, &None, &exclude);
-
-        assert_eq!(filtered.len(), 2);
-        let file_names: Vec<String> = filtered
-            .iter()
-            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
-            .collect();
-        assert!(file_names.contains(&"readme.txt".to_string()));
-        assert!(file_names.contains(&"guide.txt".to_string()));
+        // Should only move files from "src" directory
+        assert_eq!(moved_count, 1);
+        assert!(root.join("main.rs").exists());
+        assert!(!root.join("readme.txt").exists());
+        assert!(!root.join("test1.rs").exists());
     }
 
     #[test]
-    fn test_exclude_fuzzy_pattern() {
+    fn test_flatten_with_exclude_filter() {
         let temp_dir = TempDir::new().unwrap();
         let root = temp_dir.path();
         create_multi_dir_structure(root).unwrap();
 
-        let files = collect_files(root, None).unwrap();
-        assert_eq!(files.len(), 4);
+        let exclude = Some(vec!["src".to_string()]);
+        let moved_count = flatten_directory_by_traversal(root, None, &None, &exclude).unwrap();
 
-        // "doc" should exclude both "docs" and "documentation"
-        let exclude = Some(vec!["doc".to_string()]);
-        let filtered = filter_files_by_patterns(root, files, &None, &exclude);
-
-        assert_eq!(filtered.len(), 2);
-        let file_names: Vec<String> = filtered
-            .iter()
-            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
-            .collect();
-        assert!(file_names.contains(&"main.rs".to_string()));
-        assert!(file_names.contains(&"test1.rs".to_string()));
+        // Should move all files except from "src" directory
+        assert_eq!(moved_count, 3);
+        assert!(!root.join("main.rs").exists());
+        assert!(root.join("readme.txt").exists());
+        assert!(root.join("test1.rs").exists());
+        assert!(root.join("guide.txt").exists());
     }
 
     #[test]
-    fn test_no_include_or_exclude() {
+    fn test_flatten_empty_directory() {
         let temp_dir = TempDir::new().unwrap();
         let root = temp_dir.path();
-        create_multi_dir_structure(root).unwrap();
 
-        let files = collect_files(root, None).unwrap();
-        assert_eq!(files.len(), 4);
-
-        let filtered = filter_files_by_patterns(root, files.clone(), &None, &None);
-
-        // With no filters, all files should be included
-        assert_eq!(filtered.len(), 4);
+        let moved_count = flatten_directory_by_traversal(root, None, &None, &None).unwrap();
+        assert_eq!(moved_count, 0);
     }
 }
