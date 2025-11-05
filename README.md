@@ -31,13 +31,13 @@ OPTIONS
               flatten operation.
 
        -i, --include <INCLUDE>
-              Include only directories that fuzzy-match these patterns.
-              Accepts comma-separated values. Uses case-insensitive substring
+              Include only directories that begin with any of these values.
+              Accepts comma-separated values. Uses case-insensitive prefix
               matching. Cannot be used together with --exclude.
 
        -e, --exclude <EXCLUDE>
-              Exclude directories that fuzzy-match these patterns. Accepts
-              comma-separated values. Uses case-insensitive substring
+              Exclude only directories that begin with any of these values.
+              Accepts comma-separated values. Uses case-insensitive prefix
               matching. Cannot be used together with --include.
 
        -h, --help
