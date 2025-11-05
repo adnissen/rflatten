@@ -75,8 +75,8 @@ EXAMPLES
               rflatten -n 2 -e tests -y /path/to/directory
 
 PATTERN MATCHING
-       The --include and --exclude options use case-insensitive fuzzy
-       (substring) matching. For example:
+       The --include and --exclude options use case-insensitive
+       (prefix) matching. For example:
 
        • "doc" matches "docs", "documentation", "DOCS", etc.
        • "test" matches "tests", "testing", "test_files", etc.
