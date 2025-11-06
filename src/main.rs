@@ -273,6 +273,12 @@ fn flatten_directory_by_traversal_recursive(
                 // Handle filename conflicts by appending a number
                 let mut counter = 1;
                 while dest.exists() {
+                    // If the destination exists but is a directory, don't try to rename
+                    // Let fs::rename fail and handle the error below
+                    if dest.is_dir() {
+                        break;
+                    }
+
                     let stem = Path::new(file_name)
                         .file_stem()
                         .and_then(|s| s.to_str())

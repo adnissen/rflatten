@@ -1,3 +1,5 @@
+`cargo install rflatten`
+
 ```
 RFLATTEN(1)                      User Commands                     RFLATTEN(1)
 
