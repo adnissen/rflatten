@@ -3,6 +3,21 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+/// Helper function to display paths without Windows UNC prefix (\\?\)
+fn display_path(path: &Path) -> String {
+    let path_str = path.display().to_string();
+
+    // Strip the Windows UNC prefix if present
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(stripped) = path_str.strip_prefix(r"\\?\") {
+            return stripped.to_string();
+        }
+    }
+
+    path_str
+}
+
 #[derive(Parser)]
 #[command(name = "rflatten")]
 #[command(about = "Flatten subdirectories by moving all files to the root directory", long_about = None)]
@@ -272,10 +287,10 @@ fn flatten_directory_by_traversal_recursive(
                 match fs::rename(&path, &dest) {
                     Ok(_) => {
                         *moved_count += 1;
-                        println!("Moved: {} -> {}", path.display(), dest.display());
+                        println!("Moved: {} -> {}", display_path(&path), display_path(&dest));
                     }
                     Err(e) => {
-                        eprintln!("Error moving {}: {}", path.display(), e);
+                        eprintln!("Error moving {}: {}", display_path(&path), e);
                     }
                 }
             }
@@ -296,12 +311,12 @@ fn main() -> io::Result<()> {
 
     // Verify directory exists
     if !cli.directory.exists() {
-        eprintln!("Error: Directory '{}' does not exist", cli.directory.display());
+        eprintln!("Error: Directory '{}' does not exist", display_path(&cli.directory));
         std::process::exit(1);
     }
 
     if !cli.directory.is_dir() {
-        eprintln!("Error: '{}' is not a directory", cli.directory.display());
+        eprintln!("Error: '{}' is not a directory", display_path(&cli.directory));
         std::process::exit(1);
     }
 
@@ -325,7 +340,7 @@ fn main() -> io::Result<()> {
     println!(
         "Found {} file(s) to move to '{}'",
         summary.file_count,
-        canonical_directory.display()
+        display_path(&canonical_directory)
     );
 
     if !summary.top_level_dirs.is_empty() {
