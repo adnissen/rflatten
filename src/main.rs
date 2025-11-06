@@ -20,6 +20,7 @@ fn display_path(path: &Path) -> String {
 
 #[derive(Parser)]
 #[command(name = "rflatten")]
+#[command(version)]
 #[command(about = "Flatten subdirectories by moving all files to the root directory", long_about = None)]
 #[command(arg_required_else_help = true)]
 struct Cli {
@@ -67,12 +68,16 @@ fn should_include_top_level_dir(
 ) -> bool {
     // Check include patterns
     if let Some(include_patterns) = include {
-        return include_patterns.iter().any(|p| starts_with_pattern(dir_name, p));
+        return include_patterns
+            .iter()
+            .any(|p| starts_with_pattern(dir_name, p));
     }
 
     // Check exclude patterns
     if let Some(exclude_patterns) = exclude {
-        return !exclude_patterns.iter().any(|p| starts_with_pattern(dir_name, p));
+        return !exclude_patterns
+            .iter()
+            .any(|p| starts_with_pattern(dir_name, p));
     }
 
     // No filters, include everything
@@ -91,16 +96,7 @@ fn collect_file_summary(
         top_level_dirs: std::collections::HashSet::new(),
     };
 
-    collect_file_summary_recursive(
-        dir,
-        dir,
-        max_depth,
-        0,
-        include,
-        exclude,
-        &mut summary,
-        None,
-    )?;
+    collect_file_summary_recursive(dir, dir, max_depth, 0, include, exclude, &mut summary, None)?;
 
     Ok(summary)
 }
@@ -327,12 +323,18 @@ fn main() -> io::Result<()> {
 
     // Verify directory exists
     if !cli.directory.exists() {
-        eprintln!("Error: Directory '{}' does not exist", display_path(&cli.directory));
+        eprintln!(
+            "Error: Directory '{}' does not exist",
+            display_path(&cli.directory)
+        );
         std::process::exit(1);
     }
 
     if !cli.directory.is_dir() {
-        eprintln!("Error: '{}' is not a directory", display_path(&cli.directory));
+        eprintln!(
+            "Error: '{}' is not a directory",
+            display_path(&cli.directory)
+        );
         std::process::exit(1);
     }
 
@@ -529,7 +531,11 @@ mod tests {
     fn test_should_include_with_prefix_matching() {
         let include = Some(vec!["doc".to_string()]);
         assert!(should_include_top_level_dir("docs", &include, &None));
-        assert!(should_include_top_level_dir("documentation", &include, &None));
+        assert!(should_include_top_level_dir(
+            "documentation",
+            &include,
+            &None
+        ));
         assert!(!should_include_top_level_dir("src", &include, &None));
         // Test that it's prefix matching, not substring matching
         assert!(!should_include_top_level_dir("mydocs", &include, &None));
@@ -728,7 +734,8 @@ mod tests {
         let root = temp_dir.path();
         create_test_structure(root).unwrap();
 
-        let moved_count = flatten_directory_by_traversal(root, Some(2), &None, &None, false).unwrap();
+        let moved_count =
+            flatten_directory_by_traversal(root, Some(2), &None, &None, false).unwrap();
 
         // Should only move files at depths 1 and 2
         assert_eq!(moved_count, 2);
@@ -745,7 +752,8 @@ mod tests {
         create_multi_dir_structure(root).unwrap();
 
         let include = Some(vec!["src".to_string()]);
-        let moved_count = flatten_directory_by_traversal(root, None, &include, &None, false).unwrap();
+        let moved_count =
+            flatten_directory_by_traversal(root, None, &include, &None, false).unwrap();
 
         // Should only move files from "src" directory
         assert_eq!(moved_count, 1);
@@ -761,7 +769,8 @@ mod tests {
         create_multi_dir_structure(root).unwrap();
 
         let exclude = Some(vec!["src".to_string()]);
-        let moved_count = flatten_directory_by_traversal(root, None, &None, &exclude, false).unwrap();
+        let moved_count =
+            flatten_directory_by_traversal(root, None, &None, &exclude, false).unwrap();
 
         // Should move all files except from "src" directory
         assert_eq!(moved_count, 3);
@@ -845,7 +854,8 @@ mod tests {
         create_test_structure(root).unwrap();
 
         // Test with quiet mode and max depth
-        let moved_count = flatten_directory_by_traversal(root, Some(2), &None, &None, true).unwrap();
+        let moved_count =
+            flatten_directory_by_traversal(root, Some(2), &None, &None, true).unwrap();
 
         // Verify depth limiting works in quiet mode
         assert_eq!(moved_count, 2);
@@ -863,7 +873,8 @@ mod tests {
 
         let include = Some(vec!["src".to_string()]);
         // Test with quiet mode and include filter
-        let moved_count = flatten_directory_by_traversal(root, None, &include, &None, true).unwrap();
+        let moved_count =
+            flatten_directory_by_traversal(root, None, &include, &None, true).unwrap();
 
         // Verify filtering works in quiet mode
         assert_eq!(moved_count, 1);
@@ -880,7 +891,8 @@ mod tests {
 
         let exclude = Some(vec!["src".to_string()]);
         // Test with quiet mode and exclude filter
-        let moved_count = flatten_directory_by_traversal(root, None, &None, &exclude, true).unwrap();
+        let moved_count =
+            flatten_directory_by_traversal(root, None, &None, &exclude, true).unwrap();
 
         // Verify excluding works in quiet mode
         assert_eq!(moved_count, 3);
