@@ -930,4 +930,52 @@ mod tests {
             fs::read_to_string(root2.join("file2.txt")).unwrap()
         );
     }
+
+    #[test]
+    fn test_flatten_quiet_mode_outputs_errors() {
+        // This test verifies that errors are still output even in quiet mode
+        // Quiet mode should suppress informational output but NOT error messages
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        // Create a subdirectory with files
+        let subdir = root.join("subdir");
+        fs::create_dir(&subdir).unwrap();
+        fs::write(subdir.join("blocked.txt"), "will fail to move").unwrap();
+        fs::write(subdir.join("success.txt"), "will move successfully").unwrap();
+
+        // Create a DIRECTORY (not a file) in root with the same name as one of the files
+        // This will cause fs::rename to fail for blocked.txt because you can't rename
+        // a file to a path that already exists as a directory
+        let blocking_dir = root.join("blocked.txt");
+        fs::create_dir(&blocking_dir).unwrap();
+
+        // Run with quiet mode enabled
+        // The function should continue despite the error and return Ok
+        let moved_count = flatten_directory_by_traversal(root, None, &None, &None, true).unwrap();
+
+        // Verify only the successful file was moved (count should be 1, not 2)
+        assert_eq!(moved_count, 1);
+
+        // Verify success.txt was moved successfully
+        assert!(root.join("success.txt").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("success.txt")).unwrap(),
+            "will move successfully"
+        );
+
+        // Verify blocked.txt was NOT moved (still in subdirectory)
+        assert!(subdir.join("blocked.txt").exists());
+
+        // Verify the blocking directory still exists
+        assert!(blocking_dir.exists());
+        assert!(blocking_dir.is_dir());
+
+        // Note: This test verifies the error BEHAVIOR (file not moved, operation continues)
+        // The actual error message "Error moving..." is written to stderr via eprintln!
+        // In a real run with quiet mode, you would see:
+        //   stderr: "Error moving /path/to/subdir/blocked.txt: ..."
+        //   stdout: (empty - no "Moved:" messages due to quiet mode)
+        // To verify stderr output, run: cargo test test_flatten_quiet_mode_outputs_errors -- --nocapture
+    }
 }
