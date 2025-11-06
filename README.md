@@ -30,6 +30,10 @@ OPTIONS
               Skip confirmation prompt and proceed immediately with the
               flatten operation.
 
+       -q, --quiet
+              Quiet mode - suppress all output except errors. Confirmation
+              prompt is automatically skipped (same behavior as --yes).
+
        -i, --include <INCLUDE>
               Include only directories that begin with any of these values.
               Accepts comma-separated values. Uses case-insensitive prefix
@@ -49,6 +53,9 @@ EXAMPLES
 
        Skip confirmation prompt:
               rflatten -y /path/to/directory
+
+       Quiet mode (no output except errors):
+              rflatten -q /path/to/directory
 
        Only flatten first level subdirectories:
               rflatten --depth 1 /path/to/directory

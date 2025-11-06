@@ -35,6 +35,10 @@ struct Cli {
     #[arg(short = 'y', long = "yes")]
     skip_confirmation: bool,
 
+    /// Quiet mode - suppress all output except errors
+    #[arg(short = 'q', long = "quiet")]
+    quiet: bool,
+
     /// Include only directories that start with these patterns (comma-separated)
     #[arg(short = 'i', long = "include", value_delimiter = ',')]
     include: Option<Vec<String>>,
@@ -184,6 +188,7 @@ fn flatten_directory_by_traversal(
     max_depth: Option<usize>,
     include: &Option<Vec<String>>,
     exclude: &Option<Vec<String>>,
+    quiet: bool,
 ) -> io::Result<usize> {
     let mut moved_count = 0;
 
@@ -196,6 +201,7 @@ fn flatten_directory_by_traversal(
         exclude,
         &mut moved_count,
         None,
+        quiet,
     )?;
 
     Ok(moved_count)
@@ -210,6 +216,7 @@ fn flatten_directory_by_traversal_recursive(
     exclude: &Option<Vec<String>>,
     moved_count: &mut usize,
     top_level_dir: Option<String>,
+    quiet: bool,
 ) -> io::Result<()> {
     if let Some(max) = max_depth {
         if current_depth > max {
@@ -250,6 +257,7 @@ fn flatten_directory_by_traversal_recursive(
                 exclude,
                 moved_count,
                 new_top_level_dir,
+                quiet,
             )?;
         } else if file_type.is_file() {
             // Only move files that are in subdirectories (not in root)
@@ -287,7 +295,9 @@ fn flatten_directory_by_traversal_recursive(
                 match fs::rename(&path, &dest) {
                     Ok(_) => {
                         *moved_count += 1;
-                        println!("Moved: {} -> {}", display_path(&path), display_path(&dest));
+                        if !quiet {
+                            println!("Moved: {} -> {}", display_path(&path), display_path(&dest));
+                        }
                     }
                     Err(e) => {
                         eprintln!("Error moving {}: {}", display_path(&path), e);
@@ -332,27 +342,32 @@ fn main() -> io::Result<()> {
     )?;
 
     if summary.file_count == 0 {
-        println!("No files found in subdirectories to flatten.");
+        if !cli.quiet {
+            println!("No files found in subdirectories to flatten.");
+        }
         return Ok(());
     }
 
     // Show summary and get confirmation
-    println!(
-        "Found {} file(s) to move to '{}'",
-        summary.file_count,
-        display_path(&canonical_directory)
-    );
+    if !cli.quiet {
+        println!(
+            "Found {} file(s) to move to '{}'",
+            summary.file_count,
+            display_path(&canonical_directory)
+        );
 
-    if !summary.top_level_dirs.is_empty() {
-        println!("Top-level directories to be flattened:");
-        let mut dirs: Vec<_> = summary.top_level_dirs.iter().cloned().collect();
-        dirs.sort();
-        for dir in dirs {
-            println!("  - {}", dir);
+        if !summary.top_level_dirs.is_empty() {
+            println!("Top-level directories to be flattened:");
+            let mut dirs: Vec<_> = summary.top_level_dirs.iter().cloned().collect();
+            dirs.sort();
+            for dir in dirs {
+                println!("  - {}", dir);
+            }
         }
     }
 
-    if !cli.skip_confirmation {
+    // Skip confirmation if -y or -q is provided
+    if !cli.skip_confirmation && !cli.quiet {
         if !get_confirmation()? {
             println!("Flatten cancelled.");
             return Ok(());
@@ -365,9 +380,12 @@ fn main() -> io::Result<()> {
         cli.max_depth,
         &cli.include,
         &cli.exclude,
+        cli.quiet,
     )?;
 
-    println!("\nSuccessfully moved {} file(s)", moved_count);
+    if !cli.quiet {
+        println!("\nSuccessfully moved {} file(s)", moved_count);
+    }
 
     // Delete the now-empty top-level directories
     for dir in &summary.top_level_dirs {
@@ -628,7 +646,7 @@ mod tests {
         fs::write(subdir.join("test1.txt"), "content1").unwrap();
         fs::write(subdir.join("test2.txt"), "content2").unwrap();
 
-        let moved_count = flatten_directory_by_traversal(root, None, &None, &None).unwrap();
+        let moved_count = flatten_directory_by_traversal(root, None, &None, &None, false).unwrap();
 
         assert_eq!(moved_count, 2);
         assert!(root.join("test1.txt").exists());
@@ -656,7 +674,7 @@ mod tests {
         fs::create_dir(&subdir).unwrap();
         fs::write(subdir.join("test.txt"), "subdir content").unwrap();
 
-        let moved_count = flatten_directory_by_traversal(root, None, &None, &None).unwrap();
+        let moved_count = flatten_directory_by_traversal(root, None, &None, &None, false).unwrap();
 
         assert_eq!(moved_count, 1);
         // Original file should remain unchanged
@@ -690,7 +708,7 @@ mod tests {
         fs::create_dir(&subdir2).unwrap();
         fs::write(subdir2.join("test.txt"), "content2").unwrap();
 
-        let moved_count = flatten_directory_by_traversal(root, None, &None, &None).unwrap();
+        let moved_count = flatten_directory_by_traversal(root, None, &None, &None, false).unwrap();
 
         assert_eq!(moved_count, 2);
         assert!(root.join("test.txt").exists());
@@ -704,7 +722,7 @@ mod tests {
         let root = temp_dir.path();
         create_test_structure(root).unwrap();
 
-        let moved_count = flatten_directory_by_traversal(root, Some(2), &None, &None).unwrap();
+        let moved_count = flatten_directory_by_traversal(root, Some(2), &None, &None, false).unwrap();
 
         // Should only move files at depths 1 and 2
         assert_eq!(moved_count, 2);
@@ -721,7 +739,7 @@ mod tests {
         create_multi_dir_structure(root).unwrap();
 
         let include = Some(vec!["src".to_string()]);
-        let moved_count = flatten_directory_by_traversal(root, None, &include, &None).unwrap();
+        let moved_count = flatten_directory_by_traversal(root, None, &include, &None, false).unwrap();
 
         // Should only move files from "src" directory
         assert_eq!(moved_count, 1);
@@ -737,7 +755,7 @@ mod tests {
         create_multi_dir_structure(root).unwrap();
 
         let exclude = Some(vec!["src".to_string()]);
-        let moved_count = flatten_directory_by_traversal(root, None, &None, &exclude).unwrap();
+        let moved_count = flatten_directory_by_traversal(root, None, &None, &exclude, false).unwrap();
 
         // Should move all files except from "src" directory
         assert_eq!(moved_count, 3);
@@ -752,7 +770,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let root = temp_dir.path();
 
-        let moved_count = flatten_directory_by_traversal(root, None, &None, &None).unwrap();
+        let moved_count = flatten_directory_by_traversal(root, None, &None, &None, false).unwrap();
         assert_eq!(moved_count, 0);
     }
 }
