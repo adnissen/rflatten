@@ -773,4 +773,161 @@ mod tests {
         let moved_count = flatten_directory_by_traversal(root, None, &None, &None, false).unwrap();
         assert_eq!(moved_count, 0);
     }
+
+    // Tests for quiet mode
+    #[test]
+    fn test_flatten_quiet_mode_basic() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        // Create subdirectory with files
+        let subdir = root.join("subdir");
+        fs::create_dir(&subdir).unwrap();
+        fs::write(subdir.join("test1.txt"), "content1").unwrap();
+        fs::write(subdir.join("test2.txt"), "content2").unwrap();
+
+        // Test with quiet mode enabled
+        let moved_count = flatten_directory_by_traversal(root, None, &None, &None, true).unwrap();
+
+        // Verify files were moved correctly despite quiet mode
+        assert_eq!(moved_count, 2);
+        assert!(root.join("test1.txt").exists());
+        assert!(root.join("test2.txt").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("test1.txt")).unwrap(),
+            "content1"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("test2.txt")).unwrap(),
+            "content2"
+        );
+    }
+
+    #[test]
+    fn test_flatten_quiet_mode_with_conflicts() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        // Create a file in root
+        fs::write(root.join("test.txt"), "root content").unwrap();
+
+        // Create subdirectory with conflicting filename
+        let subdir = root.join("subdir");
+        fs::create_dir(&subdir).unwrap();
+        fs::write(subdir.join("test.txt"), "subdir content").unwrap();
+
+        // Test with quiet mode enabled
+        let moved_count = flatten_directory_by_traversal(root, None, &None, &None, true).unwrap();
+
+        // Verify conflict resolution works in quiet mode
+        assert_eq!(moved_count, 1);
+        assert_eq!(
+            fs::read_to_string(root.join("test.txt")).unwrap(),
+            "root content"
+        );
+        assert!(root.join("test_1.txt").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("test_1.txt")).unwrap(),
+            "subdir content"
+        );
+    }
+
+    #[test]
+    fn test_flatten_quiet_mode_with_depth() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        create_test_structure(root).unwrap();
+
+        // Test with quiet mode and max depth
+        let moved_count = flatten_directory_by_traversal(root, Some(2), &None, &None, true).unwrap();
+
+        // Verify depth limiting works in quiet mode
+        assert_eq!(moved_count, 2);
+        assert!(root.join("file1.txt").exists());
+        assert!(root.join("file2.txt").exists());
+        assert!(!root.join("file3.txt").exists());
+        assert!(!root.join("file4.txt").exists());
+    }
+
+    #[test]
+    fn test_flatten_quiet_mode_with_include_filter() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        create_multi_dir_structure(root).unwrap();
+
+        let include = Some(vec!["src".to_string()]);
+        // Test with quiet mode and include filter
+        let moved_count = flatten_directory_by_traversal(root, None, &include, &None, true).unwrap();
+
+        // Verify filtering works in quiet mode
+        assert_eq!(moved_count, 1);
+        assert!(root.join("main.rs").exists());
+        assert!(!root.join("readme.txt").exists());
+        assert!(!root.join("test1.rs").exists());
+    }
+
+    #[test]
+    fn test_flatten_quiet_mode_with_exclude_filter() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        create_multi_dir_structure(root).unwrap();
+
+        let exclude = Some(vec!["src".to_string()]);
+        // Test with quiet mode and exclude filter
+        let moved_count = flatten_directory_by_traversal(root, None, &None, &exclude, true).unwrap();
+
+        // Verify excluding works in quiet mode
+        assert_eq!(moved_count, 3);
+        assert!(!root.join("main.rs").exists());
+        assert!(root.join("readme.txt").exists());
+        assert!(root.join("test1.rs").exists());
+        assert!(root.join("guide.txt").exists());
+    }
+
+    #[test]
+    fn test_flatten_quiet_vs_normal_same_result() {
+        // Verify that quiet mode produces the same file operations as normal mode
+        let temp_dir1 = TempDir::new().unwrap();
+        let root1 = temp_dir1.path();
+
+        let temp_dir2 = TempDir::new().unwrap();
+        let root2 = temp_dir2.path();
+
+        // Create identical structures
+        let subdir1 = root1.join("subdir");
+        fs::create_dir(&subdir1).unwrap();
+        fs::write(subdir1.join("file1.txt"), "content1").unwrap();
+        fs::write(subdir1.join("file2.txt"), "content2").unwrap();
+
+        let subdir2 = root2.join("subdir");
+        fs::create_dir(&subdir2).unwrap();
+        fs::write(subdir2.join("file1.txt"), "content1").unwrap();
+        fs::write(subdir2.join("file2.txt"), "content2").unwrap();
+
+        // Run with normal mode
+        let count1 = flatten_directory_by_traversal(root1, None, &None, &None, false).unwrap();
+
+        // Run with quiet mode
+        let count2 = flatten_directory_by_traversal(root2, None, &None, &None, true).unwrap();
+
+        // Verify same number of files moved
+        assert_eq!(count1, count2);
+        assert_eq!(count1, 2);
+
+        // Verify same files exist in both directories
+        assert!(root1.join("file1.txt").exists());
+        assert!(root1.join("file2.txt").exists());
+        assert!(root2.join("file1.txt").exists());
+        assert!(root2.join("file2.txt").exists());
+
+        // Verify same content
+        assert_eq!(
+            fs::read_to_string(root1.join("file1.txt")).unwrap(),
+            fs::read_to_string(root2.join("file1.txt")).unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(root1.join("file2.txt")).unwrap(),
+            fs::read_to_string(root2.join("file2.txt")).unwrap()
+        );
+    }
 }
