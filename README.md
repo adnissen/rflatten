@@ -102,5 +102,5 @@ EXIT STATUS
 AUTHOR
        Written by Andrew Nissen
 
-rflatten 0.1.0                    2025-11-05                       RFLATTEN(1)
+rflatten 0.2.1                    2025-11-06                       RFLATTEN(1)
 ```
