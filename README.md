@@ -49,6 +49,9 @@ OPTIONS
        -h, --help
               Print help information
 
+       -V, --version
+              Print version information
+
 EXAMPLES
        Basic usage:
               rflatten /path/to/directory
