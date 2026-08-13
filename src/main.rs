@@ -2,6 +2,7 @@ use clap::Parser;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 /// Helper function to display paths without Windows UNC prefix (\\?\)
 fn display_path(path: &Path) -> String {
@@ -98,75 +99,50 @@ fn collect_flatten_plan(
         top_level_dirs: std::collections::HashSet::new(),
     };
 
-    collect_flatten_plan_recursive(dir, dir, max_depth, 0, include, exclude, &mut plan, None)?;
+    let mut walker = WalkDir::new(dir);
+    if let Some(max) = max_depth {
+        // A file at user-facing depth N (N directories below the root) sits at
+        // walkdir depth N + 1, since walkdir counts the entry itself
+        walker = walker.max_depth(max.saturating_add(1));
+    }
+
+    let entries = walker.into_iter().filter_entry(|entry| {
+        // Apply include/exclude filters to top-level directories, skipping
+        // their entire subtree when filtered out
+        if entry.depth() == 1 && entry.file_type().is_dir() {
+            match entry.file_name().to_str() {
+                Some(dir_name) => should_include_top_level_dir(dir_name, include, exclude),
+                None => false,
+            }
+        } else {
+            true
+        }
+    });
+
+    for entry in entries {
+        let entry = entry?;
+
+        // Only collect files that are in subdirectories (not in root)
+        if !entry.file_type().is_file() || entry.depth() < 2 {
+            continue;
+        }
+
+        let path = entry.into_path();
+
+        // Track the top-level directory the file lives in
+        if let Some(top_level_dir) = path
+            .strip_prefix(dir)
+            .ok()
+            .and_then(|relative| relative.components().next())
+            .and_then(|component| component.as_os_str().to_str())
+        {
+            plan.top_level_dirs.insert(top_level_dir.to_string());
+        }
+
+        plan.files.push(path);
+    }
 
     Ok(plan)
-}
-
-fn collect_flatten_plan_recursive(
-    root: &Path,
-    current: &Path,
-    max_depth: Option<usize>,
-    current_depth: usize,
-    include: &Option<Vec<String>>,
-    exclude: &Option<Vec<String>>,
-    plan: &mut FlattenPlan,
-    top_level_dir: Option<String>,
-) -> io::Result<()> {
-    if let Some(max) = max_depth {
-        if current_depth > max {
-            return Ok(());
-        }
-    }
-
-    for entry in fs::read_dir(current)? {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-
-        if file_type.is_dir() {
-            // Determine the top-level directory name
-            let new_top_level_dir = if current == root {
-                // We're at the root, so this subdirectory is a top-level directory
-                if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
-                    // Check if we should include this top-level directory
-                    if !should_include_top_level_dir(dir_name, include, exclude) {
-                        continue; // Skip this entire subtree
-                    }
-                    Some(dir_name.to_string())
-                } else {
-                    continue;
-                }
-            } else {
-                // We're in a subdirectory, inherit the top-level directory
-                top_level_dir.clone()
-            };
-
-            // Recursively traverse subdirectories
-            collect_flatten_plan_recursive(
-                root,
-                &path,
-                max_depth,
-                current_depth + 1,
-                include,
-                exclude,
-                plan,
-                new_top_level_dir,
-            )?;
-        } else if file_type.is_file() {
-            // Only collect files that are in subdirectories (not in root)
-            if path.parent() != Some(root) {
-                plan.files.push(path);
-
-                // Track the top-level directory
-                if let Some(ref dir) = top_level_dir {
-                    plan.top_level_dirs.insert(dir.clone());
-                }
-            }
-        }
-    }
-
-    Ok(())
 }
 
 fn get_confirmation() -> io::Result<bool> {
